@@ -1,0 +1,68 @@
+name: Passive MetaMask Accounts Passive Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      attest:
+        description: 'Type exactly: I have legal authorization'
+        required: true
+      concurrency:
+        description: 'parallel headless jobs (small number)'
+        required: true
+        default: '3'
+
+jobs:
+  run:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gate
+        run: |
+          if [ "${{ github.event.inputs.attest }}" != "I have legal authorization" ]; then
+            echo "::error::missing attestation"; exit 1; fi
+          if [ ! -s admin-targets.txt ]; then echo "::error:: add admin-targets.txt"; exit 1; fi
+
+      - name: Setup Python + deps
+        uses: actions/setup-python@v4
+        with: { python-version: '3.11' }
+      - run: |
+          sudo apt-get update -y
+          sudo apt-get install -y chromium-browser xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libx11-xcb1 libxcomposite1 libxrandr2 libgbm1 libasound2
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Setup Node & Puppeteer
+        uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: |
+          cd scripts
+          npm ci || npm i puppeteer@22.7.1
+          cd -
+
+      - name: Run passive_enum.py
+        run: |
+          python3 scripts/passive_enum.py --targets admin-targets.txt --out out --concurrency 3
+
+      - name: Run headless capture (parallel-ish)
+        run: |
+          mkdir -p out/evidence/har out/evidence/screens
+          while read -r host; do
+            node scripts/headless_capture.js "$host" "$(pwd)/out/evidence" "$(pwd)/out/raw" "PassiveEnum/1.0" &
+            sleep 0.7
+          done < admin-targets.txt
+          wait
+
+      - name: Run TLS check
+        run: |
+          python3 scripts/tls_check.py --targets admin-targets.txt --out out/raw/tls.jsonl
+
+      - name: Build triage
+        run: |
+          python3 scripts/triage_helper.py --raw out/raw --out out/triage.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: passive-output
+          path: out/**
